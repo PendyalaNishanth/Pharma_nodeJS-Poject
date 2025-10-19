@@ -1,0 +1,261 @@
+<?xml version="1.0"?>
+<project xmlns:ht="happytrails" name="PaymentBackendService-1.0" basedir="." default="release"
+         xmlns:coral="antlib:com.amazon.coral">
+
+    <property name="configuration.dir" location="${basedir}/configuration"/>
+    <property name="findbugs.exclude.filter" location="${configuration.dir}/findbugs-exclude.xml"/>
+    <!-- Import HappyTrails, HappierTrails and Coral helpers -->
+    <import file="${happytrails.root}/happytrails.xml" optional="false"/>
+    <!--Disco BTI import-->
+    <ht:import file="disco-bti-service.xml"/>
+    <ht:import file="coral-generator.xml" optional="false"/>
+    <ht:import file="coral-launcher.xml" optional="false"/>
+    <ht:import file="happier-trails.xml" optional="false"/>
+    <ht:import file="lombok/happier-trails.xml"/>
+    <ht:import file="chronometer.xml" />
+    <chronometer-check velocityThreshold="10" minVelocityCoverageRate="0.60" failBuild="false" />
+
+    <property name="coverage.exclude.instrument.pattern" value="
+        **/virtualaccount/*.*,
+        **/com/amazon/paymentbackendservice/constants/*.*,
+        **/com/amazon/paymentbackendservice/health/*.*,
+        **/com/amazon/paymentbackendservice/mail/*.*
+    "/>
+
+    <!-- Set any property overrides -->
+    <property name="coral-src.dir" location="${output.dir}/private/src"/>
+    <property name="coral-tst.dir" location="${output.dir}/private/tst"/>
+    <property name="coral-model-package" value="PaymentBackendServiceModel"/>
+
+    <!--
+        Delete this line and remove checkstyle-config.xml to pick up HappierTrails
+        more strick checkstyle ruleset.
+    -->
+    <property name="checkstyle.configuration.file" location="${configuration.dir}/checkstyle-config.xml"/>
+
+    <!-- 
+         Server properties overrides, used only when running in your workspace. When
+         running in Apollo, these properties are set by the JDBC and HttpServer op-configs
+     -->
+    <property name="http-port" value="8000"/>
+    <property name="https-port" value="8001"/>
+
+    <!--
+        Generate the service types, model index, and abstract activities. You can also generate service explorer here
+        if it is needed in your test/development  environments. Please use Coral Diver instead of Coral Service Explorer in
+        Production environments as it is not secure to use service explorer in Production services -    
+    -->
+    <target name="generate">
+        <mkdir dir="${coral-src.dir}"/>
+        <!-- Generate the source -->
+        <coral:generate dir="${coral-src.dir}" mode="types,index,server,explorer" stalecheck="true">
+            <package name="${coral-model-package}"/>
+        </coral:generate>
+        <!-- Compile the coral source -->
+        <ht:compile srcdir="${coral-src.dir}" destdir="${generated.classes.dir}"/>
+    </target>
+
+    <!-- Generate activity stubs into src directory -->
+    <target name="generate-stubs">
+        <!-- Generate the source -->
+        <coral:generate dir="${sources.dir}" mode="stub" stalecheck="false">
+            <package name="${coral-model-package}"/>
+        </coral:generate>
+    </target>
+
+    <!-- Generate the Java client for unit tests -->
+    <target name="test-generate" depends="compile">
+        <if>
+            <isset property="standard.test.compile.classpath" />
+            <then>
+                <echo message="Reusing the standard.test.compile.classpath property" />
+                <property name="test.generate.classpath" value="${standard.test.compile.classpath}" />
+            </then>
+            <else>
+                <property name="test.generate.classpath" value="${bp:testbuild.classpath}" />
+            </else>
+        </if>
+        <mkdir dir="${coral-tst.dir}"/>
+        <!-- Generate the source -->
+        <coral:generate dir="${coral-tst.dir}" mode="javaclient" stalecheck="true">
+            <package name="${coral-model-package}"/>
+        </coral:generate>
+        <!-- Compile the coral source -->
+        <ht:compile srcdir="${coral-tst.dir}" destdir="${testclasses.dir}">
+            <extra-classpath>
+                <path path="${test.generate.classpath}" />
+            </extra-classpath>
+        </ht:compile>
+    </target>
+
+    <!-- Copy anything in the static-content directory to the server static area -->
+    <target name="copy-static-content">
+        <mkdir dir="${output.dir}/private/static-content"/>
+        <mkdir dir="${output.dir}/static-content"/>
+        <copy todir="${output.dir}/private/static-content">
+            <fileset dir="${basedir}/static-content" erroronmissingdir="false"/>
+        </copy>
+        <copy todir="${output.dir}/static-content">
+            <fileset dir="${basedir}/static-content" erroronmissingdir="false"/>
+        </copy>
+    </target>
+
+    <!-- Generate the Apollo script to start your service
+         Note: When modifying properties/env/jvmargs/etc here, remember to also
+         update the server target as well
+    -->
+    <target name="apollo-script">
+        <coral:apollo target="${output.dir}/bin/run-service.sh">
+            <env key="LANG" value="en_US.UTF-8"/>
+            <env key="NLS_LANG" value="American_America.UTF8"/>
+            <sysproperty key="file.encoding" value="UTF-8"/>
+
+            <sysproperty key="javax.net.ssl.trustStore" value="certs/InternalAndExternalTrustStore.jks"/>
+            <sysproperty key="javax.net.ssl.trustStorePassword" value="amazon"/>
+
+            <!-- Idle client connections are closed after 20 seconds. The current
+                 default idle connection timeout for netscaler VIPs is 180 seconds,
+                 meaning idle client connections will close before a VIP reaps the
+                 connection from its idle connection pool. In general, this prevents
+                 connections from going stale and removes the need to check for
+                 stale connections. Stale connection checking has
+                 been disabled for the BSFJavaClient in brazil config.
+            -->
+            <sysproperty key="timeout.close.idle.connections" value="20"/>
+
+            <!-- DNS TTLs recommended by L7 -->
+            <sysproperty key="networkaddress.cache.ttl" value="60"/>
+            <sysproperty key="networkaddress.cache.negative.ttl" value="10"/>
+
+            <jvmarg line="-Xms2G"/>
+            <jvmarg line="-Xmx3G"/>
+            <jvmarg value="-XX:+UseG1GC"/>
+            <jvmarg value="-XX:MaxGCPauseMillis=100"/>
+            <jvmarg line="-XX:+HeapDumpOnOutOfMemoryError" />
+            <jvmarg value="-XX:HeapDumpPath=$APOLLO_ENVIRONMENT_ROOT/var/output/logs"/>
+            <!-- Kill on OOM (logscan for PMAdmin.log *may* trigger an alarm) -->
+            <jvmarg value="-XX:OnOutOfMemoryError=&quot;/bin/kill -9 %p&quot;"/>
+            <jvmarg line="-verbose:gc" />
+
+            <!-- IPv6 is not supported in Amazon, but the newer versions of Java prefer it -->
+            <jvmarg value="-Djava.net.preferIPv4Stack=true"/>
+
+            <!-- Configure log4j 2.x -->
+            <sysproperty key="java.util.logging.manager" value="org.apache.logging.log4j.jul.LogManager"/>
+            <sysproperty key="Log4jContextSelector"
+                         value="org.apache.logging.log4j.core.async.AsyncLoggerContextSelector"/>
+            <sysproperty key="log4j.configurationFile" value="log-configuration/log4j2.xml"/>
+
+            <location dir="${basedir}" pattern="spring-configuration/application-config.xml"/>
+        </coral:apollo>
+    </target>
+
+    <taskdef name="generate-wrapper" classname="com.amazon.happytrails.task.ApolloJavaWrapperGenerator"
+             classpath="${bp:tool.classpath}"/>
+
+    <!--destinationFile="/apollo/env/PaymentBackendService/bin/payment_balance_updater_30min_job"-->
+    <target name="generateWrappers" depends="build">
+        <generate-wrapper
+                classname="com.amazon.paymentbackendservice.djs.BalanceUpdaterJobMain"
+                destinationFile="${output.dir}/bin/payment_balance_updater_30min_job"
+                jvmArgs=""/>
+        <generate-wrapper
+                classname="com.amazon.paymentbackendservice.djs.SyncSellerPreferenceJobMain"
+                destinationFile="${output.dir}/bin/SyncSellerPreference"
+                jvmArgs=""/>
+        <generate-wrapper
+                classname="com.amazon.paymentbackendservice.djs.AdjustBalanceDiscrepancyJob"
+                destinationFile="${output.dir}/bin/AdjustBalanceDiscrepancyJob"
+                jvmArgs=""/>
+    </target>
+
+    <!-- Copy process manager config and apollo validation tests over -->
+    <target name="copy-configuration">
+        <copy todir="${output.dir}">
+            <fileset dir="${configuration.dir}">
+                <include name="brazil-config/**/*"/>
+                <include name="ApolloCmd/**/*"/>
+                <include name="etc/**/*"/>
+                <include name="spring-configuration/**/*"/>
+                <include name="log-configuration/**/*"/>
+                <include name="monitoring/**/*"/>
+            </fileset>
+        </copy>
+        <chmod dir="${output.dir}/ApolloCmd" includes="**/*" perm="ugo+x"/>
+
+        <!-- Set up a private config area to support the 'server' target -->
+        <copy todir="${output.dir}/private">
+            <fileset dir="${bp:run.configfarm.brazil-config}">
+                <include name="brazil-config/**/*"/>
+            </fileset>
+        </copy>
+        <copy todir="${output.dir}/private">
+            <fileset dir="${bp:run.configfarm.spring-configuration}">
+                <include name="spring-configuration/**/*"/>
+            </fileset>
+        </copy>
+        <copy todir="${output.dir}/private">
+            <fileset dir="${bp:run.configfarm.certs}">
+                <include name="certs/**/*"/>
+            </fileset>
+        </copy>
+    </target>
+
+    <!-- For support of Sentry when launch the coral server-->
+    <exec executable="hostname" outputproperty="hostname"/>
+    <!-- Launch the coral server 
+         Note: When modifying properties/env/jvmargs/etc here, remember to also
+         update the apollo-script target as well
+    -->
+    <target name="server" depends="build">
+        <coral:launch>
+            <location dir="${output.dir}/private" pattern="spring-configuration/application-config.xml"/>
+            <classpath path="${bp:run.classpath}"/>
+            <sysproperty key="org.newsclub.net.unix.library.path" value="${bp:[JUnixSocket]pkg.lib}"/>
+
+            <sysproperty key="root" value="${output.dir}/private"/>
+            <sysproperty key="domain" value="test"/>
+            <sysproperty key="realm" value="CNAmazon"/>
+
+            <sysproperty key="javax.net.ssl.trustStore"
+                         value="${output.dir}/private/certs/InternalAndExternalTrustStore.jks"/>
+            <sysproperty key="javax.net.ssl.trustStorePassword" value="amazon"/>
+
+            <sysproperty key="apollo.OCF.HttpServer.httpRegularPort" value="${http-port}"/>
+            <sysproperty key="apollo.OCF.HttpServer.httpSecurePort" value="${https-port}"/>
+            <sysproperty key="java.io.tmpdir" value="${output.dir}/private/var/tmp"/>
+            <sysproperty key="apollo.OCF.HttpServer.httpServerName" value="${hostname}"/>
+
+            <env key="LANG" value="en_US.UTF-8"/>
+            <env key="NLS_LANG" value="American_America.UTF8"/>
+            <sysproperty key="file.encoding" value="UTF-8"/>
+
+            <jvmarg line="-Xms256M"/>
+            <jvmarg line="-Xmx256M"/>
+            <jvmarg value="-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=localhost:5050"/>
+
+            <sysproperty key="java.util.logging.manager" value="org.apache.logging.log4j.jul.LogManager"/>
+            <sysproperty key="Log4jContextSelector"
+                         value="org.apache.logging.log4j.core.async.AsyncLoggerContextSelector"/>
+            <sysproperty key="log4j.configurationFile"
+                         value="${basedir}/configuration/log-configuration/log4j2-test.xml"/>
+
+        </coral:launch>
+    </target>
+
+    <target name="copy-quasicreditfile">
+        <copy todir="${output.dir}">
+            <fileset dir="${basedir}">
+                <include name="res/*.csv"/>
+            </fileset>
+        </copy>
+    </target>
+
+    <target name="release" depends="copy-configuration, standard-release, generateWrappers"/>
+    <target name="compile" depends="generate,standard-compile,copy-quasicreditfile"/>
+    <target name="test-compile" depends="test-generate,standard-test-compile"/>
+    <target name="build" depends="standard-build,copy-static-content,copy-configuration,apollo-script"/>
+
+    <target name="reports" depends="standard-reports, chronometer" />
+
+</project>
